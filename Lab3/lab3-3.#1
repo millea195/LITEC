@@ -1,0 +1,346 @@
+/* Names: Amelia Miller, Young Heon Kim, , 
+    Section: 4 - A
+    Date: October 24, 2014
+    File name: Lab3.3 (Compass)
+    Description: Code for Lab 3.3 - Automated Steering*/
+
+#include <c8051_SDCC.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <i2c.h>
+//-----------------------------------------------------------------------------
+// Function Prototypes
+//-----------------------------------------------------------------------------
+void Port_Init(void);
+void PCA_Init (void);
+void XBR0_Init(void);
+void SMBUS_Init(void);
+void PCA_ISR ( void ) __interrupt 9;
+
+unsigned int ReadCompass(void);
+void Steering_Servo(void);
+void Calibrate(void);
+void Compass_Heading(void);
+void Automate_Steering(void);
+
+//-----------------------------------------------------------------------------
+// Global Variables
+//-----------------------------------------------------------------------------
+__sbit __at 0xB7 SS; //Auto-Steering Switch on 3.7
+
+unsigned int PW_CENTER = 2764; //About 1.5ms
+unsigned int PW_MIN = 1659; //Left Control 0.9ms
+unsigned int PW_MAX = 3870; //Right Control 2.1ms
+unsigned int PW = 0;
+
+unsigned int heading;
+unsigned int D_heading;
+unsigned int prev_heading = 4000;
+int h_change;
+unsigned char new_heading =0;
+unsigned char h_count = 0;
+unsigned char heading_num = 0;
+
+//-----------------------------------------------------------------------------
+// Main Function
+//-----------------------------------------------------------------------------
+void main(void)
+{
+    // initialize board
+    Sys_Init();
+    putchar(' '); //the quotes in this line may not format correctly
+    Port_Init();
+    XBR0_Init();
+	SMBUS_Init();
+    PCA_Init();
+
+    //print beginning message
+    printf("Start \n\r");
+    // set the PCA output to a neutral setting
+	PW = PW_CENTER;
+	PCA0CPL0 = 0xFFFF - PW;
+    PCA0CPH0 = (0xFFFF - PW) >> 8;
+	Calibrate(); //Includes skip function, but may also be commented out
+    PW = PW_CENTER;
+  	PCA0CPL0 = 0xFFFF - PW;
+    PCA0CPH0 = (0xFFFF - PW) >> 8;
+    while(1)
+	{
+		if(1)
+			{Automate_Steering();}
+		/*else
+        {
+			//Steering_Servo(); //Lab 4?
+			PW = PW_CENTER;
+			PCA0CPL0 = 0xFFFF - PW;
+    		PCA0CPH0 = (0xFFFF - PW) >> 8;
+
+		}*/
+	}
+}
+
+//-----------------------------------------------------------------------------
+// Port_Init
+//-----------------------------------------------------------------------------
+//
+// Set up ports for input and output
+//
+void Port_Init()
+{
+    P1MDOUT = 0x01;  //set output pin for CEX0 in push-pull mode
+
+	P3MDOUT &= ~0x80;
+
+	P3 |= 0x80;
+}
+
+//-----------------------------------------------------------------------------
+// XBR0_Init
+//-----------------------------------------------------------------------------
+//
+// Set up the crossbar
+//
+void XBR0_Init()
+{
+    XBR0 = 0x27;  //configure crossbar as directed in the laboratory (compass)
+
+}
+
+void SMBUS_Init()
+{
+	SMB0CR=0x93;
+	ENSMB = 1;
+}
+
+
+//-----------------------------------------------------------------------------
+// PCA_Init
+//-----------------------------------------------------------------------------
+//
+// Set up Programmable Counter Array
+//
+void PCA_Init()
+{
+	PCA0MD = 0x81;     // Enable CF interrupt
+	PCA0CPM0 = 0xC2;   // CCM0 in 16-bit compare mode
+ 	PCA0CN = 0x40;     // Enable PCA counter
+	EIE1 |= 0x08;      // Enable PCA interrupt
+	EA = 1;            // Enable Global Interrupts 
+
+    // reference to the sample code in Example 4.5 -Pulse Width Modulation 
+    // implemented using the PCA (Programmable Counter Array), p. 50 in Lab Manual.
+}
+
+//-----------------------------------------------------------------------------
+// PCA_ISR
+//-----------------------------------------------------------------------------
+//
+// Interrupt Service Routine for Programmable Counter Array Overflow Interrupt
+//
+void PCA_ISR ( void ) __interrupt 9
+{
+	if (CF)
+	{
+		CF = 0; //reset Interrupt Flag
+		h_count += 1;
+		if(h_count >= 2) 
+		{
+			new_heading = 1; // 2 overflows is about 40 ms
+			h_count = 0;
+			heading = ReadCompass();
+		}
+		PCA0L = 28671; 			// or PCA0L = 28671; low byte of start count
+ 		PCA0H = 28671; 	    	// or PCA0H = 28671>>8; high byte of start count (20 ms)
+	}
+    // reference to the sample code in Example 4.5 -Pulse Width Modulation 
+    // implemented using the PCA (Programmable Counter Array), p. 50 in Lab Manual.
+}
+
+void Steering_Servo()
+{
+    char input;
+	printf("Turn right or left?\n\r");
+    //wait for a key to be pressed
+    input = getchar();
+    if(input == 'r')  // single character input to increase the pulsewidth
+    {
+        if(PW < PW_MAX)
+        	{PW += 10;}
+        if(PW > PW_MAX)  // check if pulsewidth maximum exceeded
+        	{PW = 3870;}     // set PW to a maximum value
+    }
+    else if(input == 'l')  // single character input to decrease the pulsewidth
+    {
+        if(PW > PW_MIN)
+        	{PW -= 10;}
+        if(PW < PW_MIN)  // check if less than pulsewidth minimum
+        	{PW = 1659;}     // set PW to a minimum value
+    }
+	if (input != 'r' && input != 'l')
+	{
+		printf("Please press L or R \n\r");
+	}
+    printf("PW: %u\n", PW);
+    PCA0CPL0 = 0xFFFF - PW;
+    PCA0CPH0 = (0xFFFF - PW) >> 8;
+}
+
+void Calibrate()
+{
+	char input = 0;
+	printf("Calibrate Car? y or n \n\r");
+	input = getchar();
+	if (input == 'y')
+	{
+		printf("Embedded Control Steering Calibration\n\r");
+		input = 0;
+		printf("Center Wheels - hit 1 when finished\n\r");
+		while (input != '1' && PW<(PW_MAX) && PW>(PW_MIN))
+		{
+			input = getchar();
+			if (input == 'r')
+			{
+				PW += 10;
+				PCA0CPL0 = 0xFFFF - PW;
+    			PCA0CPH0 = (0xFFFF - PW) >> 8;
+				printf("Wheels turned right - hit 1 when center\n\r");
+			}
+			else if (input == 'l')
+			{
+				PW -= 10;
+				PCA0CPL0 = 0xFFFF - PW;
+    			PCA0CPH0 = (0xFFFF - PW) >> 8;
+				printf("Wheels turned left - hit 1 when center\n\r");
+			}
+		}
+		PW_CENTER = PW; //set center value
+		PW = PW_CENTER;
+		input = 0;
+		printf("Set Maximum - hit 1 when finished\n\r");
+		while (input != '1' && PW<PW_MAX) //safety threshold
+		{
+			input = getchar();
+			if (input == 'r')
+				{PW += 10;}
+				PCA0CPL0 = 0xFFFF - PW;
+    			PCA0CPH0 = (0xFFFF - PW) >> 8;
+				printf("Wheels turned right - hit 1 when finished\n\r");
+		}
+		PW_MAX = PW-10; //to ensure that car isn't over-turned
+		PW = PW_CENTER;
+		input = 0;
+    	printf("Set Minimum - hit 1 when finished\n\r");
+		while (input != '1' && PW>PW_MIN) //safety threshold
+		{
+			input = getchar();
+			if (input == 'l')
+				{PW -= 10;}
+				PCA0CPL0 = 0xFFFF - PW;
+    			PCA0CPH0 = (0xFFFF - PW) >> 8;
+				printf("Wheels turned left - hit 1 when finished\n\r");
+		}
+		PW_MIN = PW+10; //to ensure that car isn't over-turned
+	}
+}
+
+unsigned int ReadCompass() //template code for reading compass headings
+{
+	unsigned char addr = 0xC0; // the address of the sensor, 0xC0 for the compass
+	unsigned char Data[2];     // Data is an array with a length of 2
+	unsigned int hdng;      // the heading returned in degrees between 0 and 3599
+	i2c_read_data(addr, 2, Data, 2); // read two bytes, starting at reg 2 
+	
+	
+
+	
+	hdng =(((unsigned int)Data[0] << 8) | Data[1]); //combine the two values
+	                //heading has units of 1/10 of a degree 
+	//printf("%u", hdng);
+	return hdng; // the heading returned in degrees between 0 and 3599
+}
+
+void Compass_Heading()
+{
+	if (new_heading == 1) // enough overflows for a new heading 
+	{
+		heading = ReadCompass();
+		heading_num++;
+		if (heading_num >= 5) //print every 5th heading
+		{
+			//printf("heading: %u \n\r", heading); //print heading
+			heading_num = 0;
+			/*
+			if (prev_heading != 4000)
+			{
+				h_change = (heading - prev_heading);
+				h_change = h_change * (25); //time change is 40ms; 40/1000 = 1/25
+				//printf("Rate of change: %d per second \n\r", h_change);
+			}*/
+		}
+		//prev_heading = heading;
+		new_heading = 0;
+	}
+}
+
+void Automate_Steering()
+{
+	unsigned char count = 0;
+	signed int error;
+	unsigned char input = 0;
+	unsigned int new_PW;	
+	printf("Select desired heading: N, E, W, or S \n\r");
+	input = getchar();
+	if (input == 'n')
+		{D_heading = 0;}
+	else if (input == 'e')
+		{D_heading = 900;}
+	else if (input == 's')
+		{D_heading = 1800;}
+	else if (input == 'w')
+		{D_heading = 2700;}
+	while (heading != D_heading)
+	{
+		error = (D_heading - heading); //Calculate Error
+		if (count >= 20);
+		{
+			printf("Desired Heading: %d \n\r", D_heading);
+			printf("Heading: %d \n\r", heading);
+			printf("PW: %d \n\r", PW);
+			count = 0;
+		}
+		if (error < -1800)
+			{error = 3600 + error;}
+		else if (error > 1800)
+			{error = 3600 - error;}
+		new_PW = (error*(1)) + PW_CENTER; //Calculate correcting PW
+
+		if (new_PW < PW_MAX && new_PW > PW_MIN)
+		{
+			PW = new_PW;
+			PCA0CPL0 = 0xFFFF - PW;
+    		PCA0CPH0 = (0xFFFF - PW) >> 8;
+		}
+		else if (new_PW > PW_MAX)
+		{
+			PW = PW_MAX;
+			PCA0CPL0 = 0xFFFF - PW;
+    		PCA0CPH0 = (0xFFFF - PW) >> 8;
+		}
+		else if (new_PW < PW_MIN)
+		{
+			PW = PW_MIN;
+			PCA0CPL0 = 0xFFFF - PW;
+    		PCA0CPH0 = (0xFFFF - PW) >> 8;
+		}  
+
+		count+=1;
+
+	}
+	printf("Desired Heading: %d \n\r", D_heading);
+	printf("Heading: %u \n\r", heading);
+	printf("PW: %d \n\r", PW);
+
+	PW = PW_CENTER;
+	PCA0CPL0 = 0xFFFF - PW;
+    PCA0CPH0 = (0xFFFF - PW) >> 8;
+}

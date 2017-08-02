@@ -1,0 +1,272 @@
+/*  Names: Amelia Miller, Young Heon Kim
+    Section: 4 - A
+    Date: September 16, 2014
+    File name: Lab1-2
+    Description: Code for Lab 1.2
+*/
+/*
+  Edit the functions after main (except random)
+
+  This program demonstrates the use of T0 interrupts. The code will count the
+  number of T0 timer overflows that occur while a slide switch is in the ON position.
+*/
+
+#include <c8051_SDCC.h>// include files. This file is available online
+#include <stdio.h>
+#include <stdlib.h>
+
+//-----------------------------------------------------------------------------
+// Function Prototypes
+//-----------------------------------------------------------------------------
+void Port_Init(void);      // Initialize ports for input and output
+void Timer_Init(void);     // Initialize Timer 0 
+void Interrupt_Init(void); //Initialize interrupts
+void Timer0_ISR(void) __interrupt 1;
+
+unsigned char random(void);
+void Pause(void);          //Adds the 1 second delay
+void SPause(void);         //Adds a shorter delay
+void LPause(void);         //Pauses the game after current light finishes
+
+
+//-----------------------------------------------------------------------------
+// Global Variables
+//-----------------------------------------------------------------------------
+__sbit __at 0xB6 LED0; // LED0, associated with Port 3 Pin 6
+__sbit __at 0xB5 LED1; // LED1, associated with Port 3 Pin 5
+__sbit __at 0xB3 BLED1;
+__sbit __at 0xB4 BLED2;
+__sbit __at 0xB0 PB1;  // Push button 1, associated with Port 3, Pin 0
+__sbit __at 0xB1 PB2; // Push button 2, associated with Port 3, Pin 1
+__sbit __at 0xA0 SS;    // Slide Switch associated with Port 2 Pin 0
+// sbit settings are incomplete, include those developed 
+// in Lab 1-1 and add the sbit setting for LED1
+unsigned int Counts = 0;
+
+
+//***************
+void main(void)
+{
+    Sys_Init();      // System Initialization
+    Port_Init();     // Initialize ports 2 and 3 
+    Interrupt_Init();
+    Timer_Init();    // Initialize Timer 0 
+
+    putchar(' ');    // the quote fonts may not copy correctly into SiLabs IDE
+    printf("Start\r\n");
+
+    while (1) /* the following loop prints the number of overflows that occur
+                while the pushbutton is pressed, the BILED is lit while the
+                button is pressed */
+    {
+        if(!SS)
+		{
+			unsigned char correct = 0;
+			unsigned char wrong = 0;
+			unsigned char loops = 0;
+			unsigned char select = 3;
+			unsigned char prev = 3;
+			while (loops < 10)
+				{
+					while (select == prev)
+					{
+						select = random();
+					}
+					if (select == 0)
+					{
+						LED0 = 0;
+						Pause();
+						LED0 = 1;
+						if (!PB1 && PB2)
+						{
+							BLED1 = 1;
+							BLED2 = 0; //BiLED lights green
+							SPause();
+							BLED1 = 1;
+							BLED2 = 1;
+							correct += 1;
+						}
+						else
+						{
+							BLED1 = 0;
+							BLED2 = 1; //BiLED lights red
+							SPause();
+							BLED1 = 1;
+							BLED2 = 1;
+							wrong += 1;
+						}
+					}
+					else if (select == 1)
+					{
+						LED1 = 0;
+						Pause();
+						LED1 = 1;
+						if (!PB2 && PB1)
+						{
+							BLED1 = 1;
+							BLED2 = 0; //BiLED lights green
+							SPause();
+							BLED1 = 1;
+							BLED2 = 1;
+							correct += 1;
+						}
+						else
+						{
+							BLED1 = 0;
+							BLED2 = 1; //BiLED lights red
+							SPause();
+							BLED1 = 1;
+							BLED2 = 1;
+							wrong += 1;
+						}
+					}
+					else if (select == 2)
+					{
+						LED0 = 0;
+						LED1 = 0;
+						Pause();
+						LED0 = 1;
+						LED1 = 1;
+						if (!PB1 && !PB2)
+						{
+							BLED1 = 1;
+							BLED2 = 0; //BiLED lights green
+							SPause();
+							BLED1 = 1;
+							BLED2 = 1;
+							correct += 1;
+						}
+						else
+						{
+							BLED1 = 0;
+							BLED2 = 1; //BiLED lights red
+							SPause();
+							BLED1 = 1;
+							BLED2 = 1;
+							wrong += 1;
+						}
+					}
+					LED0 = 1;
+					LED1 = 1;
+					BLED1 = 1;
+					BLED2 = 1;
+					loops += 1;
+					prev = select;
+					Pause();
+					if (SS)
+					{
+						LPause();
+					}
+				}
+			printf("\r Number Correct: %d, Number Incorrect: %d \n", correct, wrong);	
+		}
+		while (!SS)
+		{
+			TR0 = 0;
+		} //while switch is still on, wait
+	}
+}		
+		
+		
+		
+		// while SS is OFF (high), wait for SS to be set ON
+
+        /*TR0 = 1;     // Timer 0 enabled
+        while (PB1); // wait until PB1 is pressed
+        Counts = 0;  // set overflow counter to zero
+
+        BLED1 = 1;  // while button is down, turn ON the BILED
+        BLED2 = 0;
+
+        while (!PB1);// wait until PB1 is released
+        TR0 = 0;     // Timer 0 disabled
+
+        BLED1 = 0;  // Turn OFF the BILED
+        BLED2 = 0;
+        printf("\rNumber of Overflows = %d\n", Counts);
+		*/
+
+
+//***************
+void Port_Init(void)
+{
+
+	// Port 3
+P3MDOUT = P3MDOUT|0x78 ; // set Port 3 output pins to push-pull mode (fill in the blank)
+P3MDOUT = P3MDOUT&0xFC ; // set Port 3 input pins to open drain mode (fill in the blank)
+P3 = P3|~0xFC; // set Port 3 input pins to high impedance state (fill in the blank)
+ 
+     // Port 2
+P2MDOUT = P2MDOUT|0x00; // set Port 2 output pins to push-pull mode (fill in the blank)
+P2MDOUT = P2MDOUT&0xFE; // set Port 2 input pins to open drain mode (fill in the blank)
+P2 = P2|~0xFE; // set Port 2 input pins to high impedance state (fill in the blank)
+
+}
+
+void Interrupt_Init(void)
+{
+    IE |= 0x02;      // enable Timer0 Interrupt request
+    EA = 1;       // enable global interrupts
+}
+//***************
+void Timer_Init(void)
+{
+
+    CKCON |= 0x08;  // Timer0 uses SYSCLK as source
+    TMOD &= 0xF0;   // clear the 4 least significant bits
+    TMOD |= 0x01;   // Timer0 in mode 1
+    TR0 = 0;           // Stop Timer0
+    TL0 = 0;           // Clear low byte of register T0
+    TH0 = 0;           // Clear high byte of register T0
+
+}
+
+
+//***************
+void Timer0_ISR(void) __interrupt 1
+{
+	TF0 = 0;
+	Counts++;
+}
+
+/******************************************************************************/
+/*
+  This function demonstrates how to obtain a random integer between 0 and 1 in
+  C. You may modify and use this code to get a random integer between 0 and N.
+*/
+
+/*return a random integer number between 0 and 2*/
+unsigned char random(void)
+{
+    return (rand()%3);  // rand returns a random number between 0 and 32767.
+                        // the mod operation (%) returns the remainder of 
+                        // dividing this value by 2 and returns the result,
+                        // a value of either 0 or 1.
+}
+
+void Pause(void)
+{
+	TL0 = 0x00; //clear the high bit
+	TH0 = 0x00; //clear the low bit
+	TR0 = 1;    //enable the timer
+	while((Counts/338)< 1);
+	Counts = 0;
+}
+
+void SPause(void)
+{
+	TL0 = 0x00; //clear the high bit
+	TH0 = 0x00; //clear the low bit
+	TR0 = 1;    //enable the timer
+	while((Counts/169)< 1);
+	Counts = 0;
+}
+
+void LPause(void)
+{
+	TL0 = 0x00;
+	TH0 = 0x00;
+	TR0 = 0;
+	while (SS);
+	Counts = 0;
+}

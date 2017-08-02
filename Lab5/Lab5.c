@@ -1,0 +1,439 @@
+/*  Names: Rabiul Chowdhury, Yousuf Ismail,
+           Young Heon Kim, Amelia Miller
+    Section: 4 - A
+    Date: November 20, 2014
+    File name: Lab5
+    Description: Code for Lab 5 - Accelerometer*/
+ 
+#include <c8051_SDCC.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <i2c.h>
+ 
+#define MPW_MAX 3502    // About 1.9ms  Forward
+#define MPW_NEUT 2765   // About 1.5ms  Neutral
+#define MPW_MIN 2027    // About 1.1ms, Reverse
+
+#define TPW_MAX 3870    // About 2.1ms, Right 
+#define TPW_CENTER 2800 // About 1.5ms, Center
+#define TPW_MIN 1659    // About 0.9ms, Left
+
+#define PCA_START 28671 // About 20ms period
+ 
+//-----------------------------------------------------------------------------
+// Function Prototypes
+//-----------------------------------------------------------------------------
+void Port_Init(void);
+void PCA_Init (void);
+void XBR0_Init(void);
+void SMBUS_Init(void);
+void ADC_Init(void);
+void PCA_ISR ( void ) __interrupt 9;
+
+unsigned char read_AD_input(void);  // Reads analog value and converts to digital value
+void Calculate_Batttery(void);      // Calculates vattery voltage using ADC
+ 
+void calculate_offset(void);    // Calculates the offset values of the accelerometer
+void initialize_motor_and_servo(void);  // Sets the motor to neutral and steering servo to center
+ 
+void set_gains(void);       // Sets gains
+ 
+void read_accel(void);      // Sets global variables gx & gy
+void set_servo_PWM(void);   // Sets steering PW
+void set_drive_PWM(void);   // Sets motor PW
+ 
+void updateLCD(void);       // Displays information to LCD and SecureCRT
+
+//-----------------------------------------------------------------------------
+// Global Variables
+//-----------------------------------------------------------------------------
+__sbit __at 0xA3 run; //Slide Switch on 2.3
+
+// Pulsewidths
+unsigned int TURN_PW = 0;   // Steering Pulsewidth
+unsigned int MOTOR_PW = 0;  // Motor Pulsewidth
+
+// Car information
+unsigned int voltage;   // Battery voltage in mV    
+unsigned int heading;   // Actual heading
+unsigned int D_heading; // Desired heading
+
+// Counts
+unsigned char new_accel = 0; // Flag for count of accel timing
+unsigned char new_lcd = 0;   // Flag for count of LCD timing
+unsigned char Counts;        // General counter, increments every 20ms
+unsigned char a_count;       // Overflow count for acceleration
+unsigned char lcd_count;     // Overflow count for LCD updates
+unsigned char nCounts;       // Overflow count for keypad 
+
+// Data reading information
+unsigned char Data[4];
+unsigned char addr = 0x30; // The address of the accelerotmeter
+
+// Accelerations
+unsigned int avg_gx;    // Average x acceleration
+unsigned int avg_gy;    // Average y acceleration
+unsigned int gx;        // X acceleration
+unsigned int gy;        // Y acceleration
+
+// Feedback Gains
+unsigned char ks;       // Steering feedback gain
+unsigned char kdx;      // X-axis drive feedback gain
+unsigned char kdy;      // Y-axis drive feedback gain
+
+// Offsets
+unsigned int gx_offset; // x-axis offset
+unsigned int gy_offset;     // y-axis offset
+
+//-----------------------------------------------------------------------------
+// Main Function
+//-----------------------------------------------------------------------------
+void main(void)
+{    
+    unsigned char run_stop; // Declare local variables (slide switch)
+    Sys_Init();     // Initialize board
+    putchar(' ');   // The quotes in this line may not format correctly
+    Port_Init();    // Initialize ports
+    ADC_Init();     // Initialize Analog to Digital converter
+    XBR0_Init();    // Initialize the crossbar
+    SMBUS_Init();   // Initialize SMBus
+    PCA_Init();     // Initialize programmable counter array and interrupts
+    Accel_Init();   // Initialize accelerometer     
+     
+    initialize_motor_and_servo(); // Center wheels and set motor to neutral
+    // Hold for 1 second
+    Counts = 0; 
+    while(Counts < 50);  //50*20ms = 1000ms = 1 second
+ 
+    //calculate_offset();   // Calculate accelerometer offsets
+ 
+    a_count = 0;    // Reset acceleration count
+    lcd_count = 0;  // Reset lcd count
+    run_stop = 0;
+    while(1)
+    {       
+        if(!run)    // Run switch
+        {               // Stay in loop until switch is in run position
+            if (run_stop == 0)
+            {
+                set_gains();    // Function adjusting feedback gains (sets ks, kdx, kdy)
+                run_stop = 1;   // Only try to update once
+            }           
+
+        	if(new_accel)        // Enough overflows(1) for a new reading
+        	{
+            	read_accel();    // Read accelerations (sets gx and gy)
+            	set_servo_PWM(); // Set the servo PWM 
+            	set_drive_PWM(); // Set drive PWM
+            	if(MOTOR_PW == MPW_NEUT)
+            	{
+                	break;
+            	}
+            	new_accel = 0;   // Reset new accleration flag
+            	a_count = 0;     // Reset acceleration count
+            	printf("\r X accel. - Y accel. - Drive PW - Steering PW \n");
+            	printf("\r %u \t    %u \t  %u \t  %u \n", gx, gy, MOTOR_PW, TURN_PW);
+        	}
+
+        	if(new_lcd)         // Enough overflows(15) to write to LCD
+        	{
+            	updateLCD();    // Displays values
+            	new_lcd = 0;    // Reset new lcd flag
+            	lcd_count = 0;  // Reset lcd count
+        	}
+    	}
+		else
+			{run_stop = 0;}
+}
+
+// Initialize the motor to neutral PW and the servo to center PW
+void initialize_motor_and_servo(void)
+{
+    // Set motor to neutral
+    MOTOR_PW = MPW_NEUT;
+    PCA0CPL2 = 0xFFFF - MOTOR_PW;           // Set low byte of compare value
+    PCA0CPH2 = (0xFFFF - MOTOR_PW) >> 8;  // Set high byte of compare value
+
+    // Set steering to center
+    TURN_PW = TPW_CENTER;
+    PCA0CPL0 = 0xFFFF - TURN_PW;            // Set low byte of compare value
+    PCA0CPH0 = (0xFFFF - TURN_PW) >> 8;       // Set high byte of compare value
+}
+
+// Calculate the offset values of accelerometer
+void calculate_offset(void)
+{
+    unsigned int calibrate_avg_gx = 0;
+    unsigned int calibrate_avg_gy = 0;
+    unsigned char j;
+
+    for(j = 0; j < 32; j++)  // For 32 iterations, average 32 values
+    {
+        Counts = 0;
+        while(Counts < 1);                   // Wait 20ms to not lock up SMB
+        i2c_read_data(addr, 0x27, Data, 1); // Read status register, indicates when data is ready
+        if((Data[0]&0x03) == 0x03)          // If 2 least significant bits are high
+        {
+            i2c_read_data(addr, 0x28|0x80, Data, 4); // Assert MSB to read multiple bytes
+            calibrate_avg_gx += ((Data[1] << 8) >> 4);  // Shift the high bytes register values 8 places to left, so they occupy high 8 bits of 16
+            calibrate_avg_gy += ((Data[3] << 8) >> 4);  // bit integer, then shift right 4 places so they occupy low 12 bits of the 16-bit integer
+        }       
+
+    }
+    calibrate_avg_gx = calibrate_avg_gx >> 5; // Calculate averages
+    calibrate_avg_gy = calibrate_avg_gy >> 5; // Same as dividing by 32
+ 
+    gx_offset = calibrate_avg_gx;       // Setting global variables
+    gy_offset = calibrate_avg_gy;
+}
+
+//-----------------------------------------------------------------------------
+// Port_Init / Set up ports for input and output
+//-----------------------------------------------------------------------------
+void Port_Init()
+{
+    P1MDIN &= ~0x20;    // Set P1.5 for analog input
+    P1MDOUT &= ~0x20;   // Set P1.5 to open drain
+    P1 |= 0x20;         // Set P1.5 to high impedence
+ 
+    P2MDOUT &= ~0x04;   // Set P2.3 to open drain
+    P2 |= 0x04;         // Set P2.3 to high impedence
+}
+
+//-----------------------------------------------------------------------------
+// ADC_Init / Set up Analog to Digital Conversion
+//-----------------------------------------------------------------------------
+void ADC_Init(void)     
+{
+    REF0CN = 0x03;      // Set to internal voltage and use internal biase
+    ADC1CN = 0x80;      // Enable ADC1
+    ADC1CF |= 0x01;     // Set gain to 1
+}
+
+// Read analog input and convert to digital
+unsigned char read_AD_input(void)   
+{
+    AMX1SL = 5;                 // Set P1.5 as the analog input for ADC1
+    ADC1CN = ADC1CN & ~0x20;    // Clear the "Conversion Completed" flag
+    ADC1CN = ADC1CN | 0x10;     // Initiate A/D conversion
+    while ((ADC1CN & 0x20) == 0x00);    // Wait for conversion to complete
+    return ADC1;                // Return digital value in ADC1 register
+}
+
+// Calculate Battery voltage using ADC1 value
+void Calculate_Batttery(void)
+{
+    voltage = 47*read_AD_input();   // 12000mV/255 = 47mV/ADC_value, so ADC_value * 47 = vattery voltage
+}
+
+//-----------------------------------------------------------------------------
+// PCA_Init
+//-----------------------------------------------------------------------------
+void PCA_Init()
+{
+    PCA0MD = 0x81;     // Enable CF interrupt
+    PCA0CPM0 = 0xC2;   // CCM0 in 16-bit compare mode
+    PCA0CPM2 = 0xC2;   // CCM2 in 16-bit compare mode
+    PCA0CN = 0x40;     // Enable PCA counter
+    EIE1 |= 0x08;      // Enable PCA interrupt
+    EA = 1;            // Enable Global Interrupts    
+}
+
+//-----------------------------------------------------------------------------
+// XBR0_Init
+//-----------------------------------------------------------------------------
+void XBR0_Init()
+{
+    XBR0 = 0x27;  // Configure crossbar as directed in the laboratory (compass)
+}
+
+//-----------------------------------------------------------------------------
+// SMBUS_Init
+//-----------------------------------------------------------------------------
+void SMBUS_Init()
+{
+    SMB0CR=0x93; // Set SCL to 100 KHz(actual freq ~ 95,410 Hz)
+    ENSMB = 1;  // Bit 6 of SMB0CN, enable the SMBus
+}
+
+//-----------------------------------------------------------------------------
+// PCA_ISR / Interrupt Service Routine for Programmable Counter Array Overflow Interrupt
+//-----------------------------------------------------------------------------
+void PCA_ISR ( void ) __interrupt 9
+{
+    if (CF)                 // If overflow occurs
+    {
+        CF = 0;             // Clear overflow indicator
+
+        a_count++;          // Increment acceleration count(every 20ms)
+        if(a_count >= 1) // Update every 20 ms
+        {
+            new_accel = 1;  // Set new acceleration flag
+            a_count = 0;    // Reset acceleration count
+        }
+
+        lcd_count++;        // Increment lcd count(every 20ms)
+        if(lcd_count >= 15)  // Update every 300 ms
+        {
+            new_lcd = 1;    // Set new lcd flag
+            lcd_count = 0;  // Reset lcd count
+        }
+
+        nCounts++;          // Increment keypad count(every 20ms)               
+        PCA0L = PCA_START;      // Set low byte of PCA start
+        PCA0H = PCA_START>>8;     // Set high byte of PCA start
+    }
+
+    PCA0CN &= 0xC0;         // Handle other PCA interrupt sources
+    Counts++;               // Increment general counter (every 20ms)
+}
+
+//-----------------------------------------------------------------------------
+// I2C_Interactions / Functions that read or write to I2C
+//-----------------------------------------------------------------------------
+void read_accel(void)
+{
+    unsigned char i;
+    avg_gx = 0;     // Clear the average
+    avg_gy = 0;     // Clear the average        
+
+    for(i = 0; i < 8; i++)   // For 8 iterations, average 8 values
+    {
+        Counts = 0;
+        while(Counts < 1);                   // Wait 20ms to not lock up SMB
+        i2c_read_data(addr, 0x27, Data, 1); // Read status register, indicates when data is ready
+        if((Data[0]&0x03) == 0x03)          // If 2 least significant bits are high
+        {
+            i2c_read_data(addr, 0x28|0x80, Data, 4); // Assert MSB to read multiple bytes
+            avg_gx += ((Data[1] << 8) >> 4);    // Shift the high bytes register values 8 places to left, so they occupy high 8 bits of 16
+            avg_gy += ((Data[3] << 8) >> 4);    // bit integer, then shift right 4 places so they occupy low 12 bits of the 16-bit integer
+        }
+    }
+
+    avg_gx = avg_gx >> 3; // Calculate averages for both x and y acceleration
+    avg_gy = avg_gy >> 3; // Same as dividing by 8 
+ 
+    gx = avg_gx - 20;   // Setting global variables
+    gy = avg_gy - 8130;
+}
+
+//-----------------------------------------------------------------------------
+// Steering/Motor control 
+//-----------------------------------------------------------------------------
+void set_servo_PWM(void)
+{
+ 
+    TURN_PW = TPW_CENTER - (ks*gx);     // ks is the steering feedback gain
+
+    if(TURN_PW > TPW_MAX)
+    {
+        TURN_PW = TPW_MAX;
+    }
+
+    if(TURN_PW < TPW_MIN)
+    {
+        TURN_PW = TPW_MIN;
+    }
+
+    PCA0CPL0 = 0xFFFF - TURN_PW;        // Set low byte of compare value
+    PCA0CPH0 = (0xFFFF - TURN_PW) >> 8;   // set high byte of compare value
+}
+
+void set_drive_PWM(void)
+{
+    MOTOR_PW = MPW_NEUT + 2*(kdy*gy);         // kdy is the y-axis drive feedback gain
+    // Add correction for side-to-side tilt, forcing a forward movement to turn the car
+    MOTOR_PW += 2*(kdx*abs(gx));                // kdx is the x-axis drive feedback gain
+
+    if(MOTOR_PW > MPW_MAX)
+    {
+        MOTOR_PW = MPW_MAX;
+    }
+
+    if(MOTOR_PW < MPW_MIN)
+    {
+        MOTOR_PW = MPW_MIN;
+    }
+
+    PCA0CPL2 = 0xFFFF - MOTOR_PW;           // Set low byte of compare value
+    PCA0CPH2 = (0xFFFF - MOTOR_PW) >> 8;  // set high byte of compare value
+}
+
+//-----------------------------------------------------------------------------
+// Print to and get information from LCD Display
+//-----------------------------------------------------------------------------
+void set_gains(void)
+{
+    // Set steering gain
+    signed int input = -1;
+
+    nCounts = 0;
+    while(nCounts < 10);     // Wait 200 ms
+
+    lcd_clear();                // Clear screen
+    lcd_print("Select steer gn\n");
+    lcd_print(" 1 | 2 | 3 \n"); // Show various heading options
+    lcd_print(" 4 | 5 | 6 \n");
+    lcd_print(" 7 | 8 | 9 \n");
+
+    while (input == -1)         // While no key is pressed
+    {
+        nCounts = 0;
+        while(nCounts < 5);      // Wait 100 ms
+        input = read_keypad();  // Read the keypad 
+        ks = input-48;          // Input char decimal value - decimal value of 0(48)
+    }
+
+    // Set X-axis drive gain
+    input = -1;
+
+    nCounts = 0;
+    while(nCounts < 10);  
+	   
+    lcd_clear();
+    lcd_print("Slct x-axis dr gn\n");
+    lcd_print(" 1 | 2 | 3 \n"); // Show various heading options
+    lcd_print(" 4 | 5 | 6 \n");
+    lcd_print(" 7 | 8 | 9 \n");
+
+    while (input == -1)
+    {
+        nCounts = 0;
+        while(nCounts < 5);
+        input = read_keypad();
+        kdx = input-48;
+    }
+
+    // Set Y-axis drive gain
+    input = -1;
+
+    nCounts = 0;
+    while(nCounts < 10);
+
+    lcd_clear();
+    lcd_print("Slct y-axis dr gn\n");
+    lcd_print(" 1 | 2 | 3 \n"); // Show various heading options
+    lcd_print(" 4 | 5 | 6 \n");
+    lcd_print(" 7 | 8 | 9 \n");
+
+    while (input == -1)
+    {
+        nCounts = 0;
+        while(nCounts < 5);
+        input = read_keypad();
+        kdy = input-48;
+    }
+
+    nCounts = 0;
+    while(nCounts < 10);
+    lcd_clear();
+}
+
+void updateLCD(void)
+{
+    lcd_clear();    
+    lcd_print("\r Steering gain %u", ks);
+    lcd_print("\r Dr gn: x: %u y: %u", kdx, kdy);
+    lcd_print("\r Motor PW: %u", MOTOR_PW);
+    lcd_print("\r Steering PW: %u", TURN_PW);               
+}

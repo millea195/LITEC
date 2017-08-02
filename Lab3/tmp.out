@@ -1,0 +1,4 @@
++ C:\PROGRA~2\SDCC\bin\sdcpp.exe -nostdinc -Wall -I"C:\SiLabs\Lab3" -obj-ext=.rel -D__SDCC_MODEL_SMALL -DSDCC_MODEL_SMALL -D__SDCC_FLOAT_REENT -DSDCC_FLOAT_REENT -D__SDCC=3_4_0 -DSDCC=340 -D__SDCC_REVISION=8981 -DSDCC_REVISION=8981 -D__SDCC_mcs51 -DSDCC_mcs51 -D__mcs51 -D__STDC_NO_COMPLEX__ -D__STDC_NO_THREADS__ -D__STDC_NO_ATOMICS__ -D__STDC_NO_VLA__ -isystem "C:\Program Files (x86)\SDCC\bin\..\include\mcs51" -isystem "C:\Program Files (x86)\SDCC\bin\..\include"  "C:\SiLabs\Lab3\lab3-3.c" 
++ C:\PROGRA~2\SDCC\bin\sdas8051.exe -plosgffwy "lab3-3.rel" "lab3-3".asm
+C:\SiLabs\Lab3\lab3-3.c:152: warning 158: overflow in implicit constant conversion
+C:\SiLabs\Lab3\lab3-3.c:153: warning 158: overflow in implicit constant conversion
